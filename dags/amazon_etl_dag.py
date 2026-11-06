@@ -84,8 +84,12 @@ def amazon_books_etl():
 
         # Convert to DataFrame
         df = pd.DataFrame(books)
-        if not df.empty:
-            df.drop_duplicates(subset="Title", inplace=True)
+        #if not df.empty:
+            #df.drop_duplicates(subset="Title", inplace=True)
+
+        if df.empty:
+            raise ValueError("No books extracted (Amazon may have blocked the request).")
+        df.drop_duplicates(subset="Title", inplace=True)    
 
         os.makedirs("/opt/airflow/tmp", exist_ok=True)
         raw_path = "/opt/airflow/tmp/amazon_books_raw.csv"
@@ -96,22 +100,102 @@ def amazon_books_etl():
         summary = {
             "rows": len(df),
             "columns": list(df.columns),
-            "sample": df.head(3).to_dict('records') if not df.empty else [],
+            #"sample": df.head(3).to_dict('records') if not df.empty else [],
+            "sample": df.head(3).to_dict('records'),
         }
 
-        formatted_summary = json.dumps(summary, indent=2, ensure_ascii=False).replace('\xa0', ' ')
+        #formatted_summary = json.dumps(summary, indent=2, ensure_ascii=False).replace('\xa0', ' ')
 
         if ti:
-            ti.xcom_push(key='df_summary', value=formatted_summary)
-            print("[XCOM] Pushed JSON summary to XCom.")
+            ti.xcom_push(key="df_summary", value=summary)   # dict, not a string
+            print("[XCOM] Pushed summary to XCom.")
 
-        print("\nPreview of Extracted Data:")
-        print(df.head(5).to_string(index=False) if not df.empty else "No data extracted.")
+        print(json.dumps(summary, indent=2, ensure_ascii=False))
+
+
+
+        #if ti:
+            #ti.xcom_push(key='df_summary', value=formatted_summary)
+            #print("[XCOM] Pushed JSON summary to XCom.")
+
+        #print("\nPreview of Extracted Data:")
+        #print(df.head(5).to_string(index=False) if not df.empty else "No data extracted.")
 
         return raw_path
 
     # Task execution
+    #raw_file = get_amazon_data_books()
+
+    @task
+    def transform_amazon_books(raw_file: str):
+        """
+        Standardizes the extracted Amazon book dataset for analysis.
+        - Converts price strings (e.g., '$45.99') into numeric values
+        - Extracts numeric ratings (e.g., '4.2' from '4.2 out of 5 stars')
+        - Renames 'Price' to 'Price($)'
+        - Handles missing or unexpected field formats safely
+        - Performs light validation after numeric conversion
+        """
+        if not os.path.exists(raw_file):
+            raise FileNotFoundError(f"Raw file not found: {raw_file}")
+
+        df = pd.read_csv(raw_file)
+        print(f"[TRANSFORM] Loaded {len(df)} records from raw dataset.")
+
+        # --- Price cleaning (defensive) ---
+        if "Price" in df.columns:
+            df["Price($)"] = (
+                df["Price"]
+                .astype(str)                      # prevents .str on NaN
+                .str.replace("$", "", regex=False)
+                .str.replace(",", "", regex=False)
+                .str.extract(r"(\d+\.?\d*)")[0]   # safely extract numbers
+            )
+            df["Price($)"] = pd.to_numeric(df["Price($)"], errors="coerce")
+        else:
+            print("[TRANSFORM] Missing 'Price' column — filling with None.")
+            df["Price($)"] = None
+
+        # --- Rating cleaning (defensive) ---
+        if "Rating" in df.columns:
+            df["Rating"] = (
+                df["Rating"]
+                .astype(str)
+                .str.extract(r"(\d+\.?\d*)")[0]
+            )
+            df["Rating"] = pd.to_numeric(df["Rating"], errors="coerce")
+        else:
+            print("[TRANSFORM] Missing 'Rating' column — filling with None.")
+            df["Rating"] = None
+
+        # --- Validation: drop rows where BOTH fields failed ---
+        df.dropna(subset=["Price($)", "Rating"], how="all", inplace=True)
+
+        # --- Drop original Price column (if present) ---
+        if "Price" in df.columns:
+            df.drop(columns=["Price"], inplace=True)
+
+        # --- Save cleaned dataset ---
+        transformed_path = raw_file.replace("raw", "transformed")
+        df.to_csv(transformed_path, index=False)
+
+        print(f"[TRANSFORM] Cleaned data saved at {transformed_path}")
+        print(f"[TRANSFORM] {len(df)} valid records after standardization.")
+        print(f"[TRANSFORM] Sample cleaned data:\n{df.head(5).to_string(index=False)}")
+
+        return transformed_path
     raw_file = get_amazon_data_books()
+    transform_amazon_books(raw_file)
 
 dag = amazon_books_etl()
+
+
+   
+
+
+
+ 
+
+
+
 
