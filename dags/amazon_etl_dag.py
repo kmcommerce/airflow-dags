@@ -184,8 +184,102 @@ def amazon_books_etl():
         print(f"[TRANSFORM] Sample cleaned data:\n{df.head(5).to_string(index=False)}")
 
         return transformed_path
+
+    @task
+    def load_to_mysql(transformed_file: str):
+        """
+        Loads the transformed Amazon book dataset into a MySQL table for analysis.
+        Uses a truncate-and-load pattern to keep the table idempotent.
+        """
+        import mysql.connector
+        import numpy as np
+
+    # Note:
+    # For production-ready projects, database credentials should never be hard-coded.
+    # Airflow provides a built-in Connection system and can also integrate with
+    # secret backends (AWS Secrets Manager, Vault, etc.).
+    #
+    # Example:
+    #     hook = MySqlHook(mysql_conn_id="my_mysql_conn")
+    #     conn = hook.get_conn()
+    #
+    # For this demo, we keep a simple local config:
+        db_config = {
+            #"host": "host.docker.internal",
+            "host": "mysql",
+            "user": "airflow",
+            "password": "airflow",
+            "database": "airflow_db",
+            "port": 3306
+        }
+
+        df = pd.read_csv(transformed_file)
+        table_name = "amazon_books_data"
+    
+    # NaN -> None so MySQL stores NULL
+        df = df.astype(object).replace({np.nan: None})
+
+    # Replace NaN with None (important for MySQL compatibility)
+        #df = df.replace({np.nan: None})
+
+        conn = mysql.connector.connect(**db_config)
+        try:
+            cursor = conn.cursor()
+
+    # Create table if it does not exist
+            cursor.execute(f"""
+                CREATE TABLE IF NOT EXISTS {table_name} (
+                Title VARCHAR(512),
+                Author VARCHAR(255),
+                `Price($)` DECIMAL(10,2),
+                Rating DECIMAL(4,2)
+            );
+            """)
+
+        # Truncate table for idempotency
+            cursor.execute(f"TRUNCATE TABLE {table_name};")
+
+        # Insert rows
+            insert_query = f"""
+                INSERT INTO {table_name} (Title, Author, `Price($)`, Rating)
+                VALUES (%s, %s, %s, %s)
+            """
+        #bad row now fails the task visibly instead of quietly loading fewer rows
+            rows = [
+                (r["Title"], r["Author"], r["Price($)"], r["Rating"])
+                for _, r in df.iterrows()
+                ]
+            cursor.executemany(insert_query, rows)
+            conn.commit()
+        finally:
+            conn.close()
+
+        print(f"[LOAD] Table '{table_name}' refreshed with {len(df)} rows.")
+        
+    # Task dependencies (inside the DAG function)
     raw_file = get_amazon_data_books()
-    transform_amazon_books(raw_file)
+    transformed_file = transform_amazon_books(raw_file)
+    load_to_mysql(transformed_file)
+
+        #for _, row in df.iterrows():
+            #try:
+                #cursor.execute(
+                #insert_query,
+                #(row["Title"], row["Author"], row["Price($)"], row["Rating"])
+                #)
+            #except Exception as e:
+            # For demo purposes we simply skip bad rows.
+            # In real pipelines, you'd log or send them to a dead-letter table.
+            #print(f"[LOAD] Skipped corrupted row due to error: {e}")
+
+        #conn.commit()
+        #conn.close()
+
+        #print(f"[LOAD] Table '{table_name}' refreshed with {len(df)} rows.")
+
+        #raw_file = get_amazon_data_books()
+        #transform_amazon_books(raw_file)
+        #load_to_mysql(transformed_file)
 
 dag = amazon_books_etl()
 
