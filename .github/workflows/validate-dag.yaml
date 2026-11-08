@@ -1,0 +1,55 @@
+name: Validate Airflow DAGs
+
+on:
+  pull_request:
+    paths:
+      - "dags/**"
+      - "requirements.txt"
+      - ".github/workflows/validate-dag.yaml"
+  push:
+    branches: [main]
+    paths:
+      - "dags/**"
+      - "requirements.txt"
+      - ".github/workflows/validate-dag.yaml"
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: requirements.txt
+
+      # Same Airflow version as your Docker image, pinned with Airflow's
+      # constraints file so dependency versions are compatible
+      - name: Install Airflow and DAG dependencies
+        run: |
+          pip install -r requirements.txt \
+            "apache-airflow==3.0.1" \
+            --constraint "https://raw.githubusercontent.com/apache/airflow/constraints-3.0.1/constraints-3.11.txt"
+
+      # Imports every file in dags/. Any import error fails the job.
+      - name: Validate DAGs
+        env:
+          AIRFLOW__CORE__LOAD_EXAMPLES: "false"
+        run: |
+          python - <<'EOF'
+          from airflow.models.dagbag import DagBag
+
+          bag = DagBag(dag_folder="dags", include_examples=False)
+
+          if bag.import_errors:
+              for path, err in bag.import_errors.items():
+                  print(f"IMPORT ERROR in {path}:\n{err}")
+              raise SystemExit(1)
+
+          if not bag.dags:
+              raise SystemExit("No DAGs found in dags/")
+
+          print(f"OK: {len(bag.dags)} DAG(s) parsed: {sorted(bag.dags)}")
+          EOF
